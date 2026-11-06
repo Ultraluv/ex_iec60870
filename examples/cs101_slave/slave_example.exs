@@ -12,9 +12,12 @@ IO.puts("==================================================")
 IO.puts(" IEC 60870-5-101 Unbalanced Slave Example")
 IO.puts("==================================================")
 
+port = String.to_integer(System.get_env("CS101_PORT") || "2401")
+{:ok, bus} = VirtualBus.get_or_create(port: port)
+
 {:ok, _slave} =
   Slave.start_link(
-    transport: {VirtualBus, self()},
+    transport: {VirtualBus, bus},
     mode: :unbalanced,
     link_address: 1,
     interrogation_handler: fn conn, asdu, qoi ->
@@ -52,5 +55,5 @@ IO.puts("==================================================")
     end
   )
 
-IO.puts("[CS101 Slave] Slave station address 1 running. Press Ctrl+C to stop.")
+IO.puts("[CS101 Slave] Slave station address 1 running on bus port #{port}. Press Ctrl+C to stop.")
 Process.sleep(:infinity)

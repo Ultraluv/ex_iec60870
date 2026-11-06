@@ -25,9 +25,11 @@ end
 
 defmodule IEC60870.CS101.Transport.VirtualBus do
   @moduledoc """
-  In-memory virtual serial bus (RS-232 / RS-485 bus simulator) for CS101 Master & Slave.
+  Virtual serial bus (RS-232 / RS-485 bus simulator) for CS101 Master & Slave.
 
   Supports point-to-point (Balanced/Unbalanced) and multi-drop (Unbalanced Master with multiple Slaves).
+  Can run in-memory within a single BEAM node or bridge across separate OS processes via a TCP socket.
+
   When a participant calls `send_data/2`, the bytes are broadcast to all other attached processes
   as `{:cs101_transport_data, bus_pid, data}`.
   """
@@ -36,32 +38,98 @@ defmodule IEC60870.CS101.Transport.VirtualBus do
   @behaviour IEC60870.CS101.Transport
 
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, :ok, opts)
+    {gen_opts, bus_opts} = Keyword.split(opts, [:name, :timeout, :debug, :spawn_opt])
+    GenServer.start_link(__MODULE__, bus_opts, gen_opts)
+  end
+
+  @doc """
+  Connects to an existing VirtualBus or starts a new one.
+  - If a TCP port is given (or `CS101_PORT` environment variable), tries to connect as client;
+    if no server is running, starts as TCP server hub.
+  - If no port is given, starts an in-memory VirtualBus.
+  """
+  def get_or_create(opts \\ []) do
+    port =
+      Keyword.get(opts, :port) ||
+        (System.get_env("CS101_PORT") && String.to_integer(System.get_env("CS101_PORT")))
+
+    case port do
+      nil ->
+        start_link(opts)
+
+      p when is_integer(p) ->
+        case :gen_tcp.connect(~c"127.0.0.1", p, [:binary, packet: :raw, active: false], 100) do
+          {:ok, sock} ->
+            :gen_tcp.close(sock)
+            start_link([connect: p] ++ opts)
+
+          {:error, _} ->
+            start_link([port: p] ++ opts)
+        end
+    end
   end
 
   @doc """
   Attaches `pid` (defaults to `self()`) to the virtual bus and returns a transport tuple
   `{IEC60870.CS101.Transport.VirtualBus, bus_pid}` ready to pass to `CS101.Master` or `CS101.Slave`.
   """
-  @spec attach(pid(), pid()) :: {module(), pid()}
-  def attach(bus_pid, pid \\ self()) when is_pid(bus_pid) and is_pid(pid) do
-    :ok = GenServer.call(bus_pid, {:attach, pid})
-    {__MODULE__, bus_pid}
+  @spec attach(GenServer.server(), pid()) :: {module(), GenServer.server()}
+  def attach(bus_ref, pid \\ self()) when is_pid(pid) do
+    :ok = GenServer.call(bus_ref, {:attach, pid})
+    {__MODULE__, bus_ref}
   end
 
   @impl IEC60870.CS101.Transport
-  def send_data(bus_pid, data) when is_pid(bus_pid) and is_binary(data) do
-    GenServer.cast(bus_pid, {:transmit, self(), data})
+  def send_data(bus_ref, data) when is_binary(data) do
+    GenServer.cast(bus_ref, {:transmit, self(), data})
   end
 
   @impl IEC60870.CS101.Transport
-  def close(bus_pid) when is_pid(bus_pid) do
-    GenServer.cast(bus_pid, {:detach, self()})
+  def close(bus_ref) do
+    GenServer.cast(bus_ref, {:detach, self()})
   end
 
   @impl true
-  def init(:ok) do
-    {:ok, %{peers: MapSet.new()}}
+  def init(opts) do
+    port = Keyword.get(opts, :port)
+    connect = Keyword.get(opts, :connect)
+
+    cond do
+      connect != nil ->
+        {host, p} =
+          case connect do
+            {h, p} when is_binary(h) -> {to_charlist(h), p}
+            {h, p} -> {h, p}
+            p when is_integer(p) -> {~c"127.0.0.1", p}
+          end
+
+        case :gen_tcp.connect(host, p, [:binary, packet: :raw, active: true], 1000) do
+          {:ok, sock} ->
+            {:ok, %{peers: MapSet.new(), tcp_mode: :client, sock: sock}}
+
+          {:error, reason} ->
+            {:stop, reason}
+        end
+
+      port != nil ->
+        case :gen_tcp.listen(port, [:binary, packet: :raw, active: true, reuseaddr: true]) do
+          {:ok, listen_sock} ->
+            send(self(), :accept)
+            {:ok,
+             %{
+               peers: MapSet.new(),
+               tcp_mode: :server,
+               listen_sock: listen_sock,
+               sockets: MapSet.new()
+             }}
+
+          {:error, reason} ->
+            {:stop, reason}
+        end
+
+      true ->
+        {:ok, %{peers: MapSet.new(), tcp_mode: :none}}
+    end
   end
 
   @impl true
@@ -71,7 +139,7 @@ defmodule IEC60870.CS101.Transport.VirtualBus do
   end
 
   @impl true
-  def handle_cast({:transmit, sender, data}, state) do
+  def handle_cast({:transmit, sender, data}, %{tcp_mode: :none} = state) do
     Enum.each(state.peers, fn peer ->
       if peer != sender do
         send(peer, {:cs101_transport_data, self(), data})
@@ -81,14 +149,95 @@ defmodule IEC60870.CS101.Transport.VirtualBus do
     {:noreply, state}
   end
 
+  def handle_cast({:transmit, sender, data}, %{tcp_mode: :client} = state) do
+    Enum.each(state.peers, fn peer ->
+      if peer != sender do
+        send(peer, {:cs101_transport_data, self(), data})
+      end
+    end)
+
+    _ = :gen_tcp.send(state.sock, data)
+    {:noreply, state}
+  end
+
+  def handle_cast({:transmit, sender, data}, %{tcp_mode: :server} = state) do
+    Enum.each(state.peers, fn peer ->
+      if peer != sender do
+        send(peer, {:cs101_transport_data, self(), data})
+      end
+    end)
+
+    Enum.each(state.sockets, fn s -> :gen_tcp.send(s, data) end)
+    {:noreply, state}
+  end
+
   def handle_cast({:detach, pid}, state) do
     {:noreply, %{state | peers: MapSet.delete(state.peers, pid)}}
   end
 
   @impl true
+  def handle_info(:accept, %{tcp_mode: :server} = state) do
+    case :gen_tcp.accept(state.listen_sock, 100) do
+      {:ok, client_sock} ->
+        send(self(), :accept)
+        {:noreply, %{state | sockets: MapSet.put(state.sockets, client_sock)}}
+
+      {:error, :timeout} ->
+        send(self(), :accept)
+        {:noreply, state}
+
+      {:error, _} ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:tcp, sock, data}, %{tcp_mode: :server} = state) do
+    Enum.each(state.peers, fn peer ->
+      send(peer, {:cs101_transport_data, self(), data})
+    end)
+
+    Enum.each(state.sockets, fn s ->
+      if s != sock, do: :gen_tcp.send(s, data)
+    end)
+
+    {:noreply, state}
+  end
+
+  def handle_info({:tcp, _sock, data}, %{tcp_mode: :client} = state) do
+    Enum.each(state.peers, fn peer ->
+      send(peer, {:cs101_transport_data, self(), data})
+    end)
+
+    {:noreply, state}
+  end
+
+  def handle_info({:tcp_closed, sock}, %{tcp_mode: :server} = state) do
+    {:noreply, %{state | sockets: MapSet.delete(state.sockets, sock)}}
+  end
+
+  def handle_info({:tcp_closed, _sock}, %{tcp_mode: :client} = state) do
+    {:noreply, state}
+  end
+
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     {:noreply, %{state | peers: MapSet.delete(state.peers, pid)}}
   end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, %{tcp_mode: :server} = state) do
+    Enum.each(state.sockets, &:gen_tcp.close/1)
+    :gen_tcp.close(state.listen_sock)
+    :ok
+  end
+
+  def terminate(_reason, %{tcp_mode: :client} = state) do
+    :gen_tcp.close(state.sock)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 end
 
 defmodule IEC60870.CS101.Transport.UART do

@@ -14,8 +14,8 @@ defmodule ExIEC60870.MixProject do
 
       # Docs configuration
       name: "ExIEC60870",
-      source_url: "https://github.com/example/ex_iec60870",
-      homepage_url: "https://github.com/example/ex_iec60870",
+      source_url: "https://github.com/Ultraluv/ex_iec60870",
+      homepage_url: "https://github.com/Ultraluv/ex_iec60870",
       docs: [
         main: "IEC60870",
         extras: ["README.md"],
@@ -147,7 +147,7 @@ defmodule ExIEC60870.MixProject do
       name: "ex_iec60870",
       licenses: ["Apache-2.0"],
       links: %{
-        "GitHub" => "https://github.com/example/ex_iec60870"
+        "GitHub" => "https://github.com/Ultraluv/ex_iec60870"
       },
       files: ~w(lib examples mix.exs README.md LICENSE .formatter.exs)
     ]

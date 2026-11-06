@@ -135,6 +135,42 @@ defmodule IEC60870.CS101.LinkLayer do
 
     defp dispatch_fc(
            ll,
+           %{fc: 1, fcb_or_acd: fcb, fcv_or_dfc: fcv},
+           _is_bcast,
+           _ud,
+           app_state,
+           callbacks,
+           changes
+         ) do
+      # LL_FC_01_RESET_USER_PROCESS (IEC 60870-5-1 Section 6.2.4)
+      if fcb or fcv do
+        set_state(ll, :error, app_state, changes)
+      else
+        ll = %{ll | expected_fcb: true, last_sent_asdu_bin: nil}
+        app_state = callbacks.reset_cu_received.(app_state, false)
+        reply = ack_or_single_char(ll, false)
+        {ll, app_state, [reply], changes}
+      end
+    end
+
+    defp dispatch_fc(
+           ll,
+           %{fc: 2, fcb_or_acd: fcb, fcv_or_dfc: fcv},
+           _is_bcast,
+           _ud,
+           app_state,
+           callbacks,
+           changes
+         ) do
+      # LL_FC_02_TEST_FUNCTION_FOR_LINK (IEC 60870-5-2 Section 5.2.2)
+      {ll, _invalid_fcb?} = check_fcb(ll, fcv, fcb)
+      acd = callbacks.is_class_1_available.(app_state)
+      reply = ack_or_single_char(ll, acd)
+      {ll, app_state, [reply], changes}
+    end
+
+    defp dispatch_fc(
+           ll,
            %{fc: 7, fcb_or_acd: fcb, fcv_or_dfc: fcv},
            _is_bcast,
            _ud,
@@ -1297,8 +1333,9 @@ defmodule IEC60870.CS101.LinkLayer do
         end
 
       if not fcb_ok? do
-        # Matches LinkLayerSecondaryBalanced_handleMessage in link_layer.c:954-958 (ignore frame on FCB mismatch)
-        {bll, app_state, [], []}
+        # IEC 60870-5-1 Section 6.2.4.2: Duplicate frame received (FCB mismatch).
+        # Secondary MUST acknowledge to stop sender retransmissions, but do NOT process user data again.
+        {bll, app_state, [secondary_ack(bll)], []}
       else
         case ctrl.fc do
           0 ->

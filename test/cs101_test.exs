@@ -228,4 +228,92 @@ defmodule IEC60870.CS101Test do
 
     assert hd(recv.objects).ioa == 999
   end
+
+  test "Balanced secondary handles duplicate FCB frame by returning ACK without reprocessing data" do
+    alias IEC60870.CS101.LinkLayer.Balanced
+    alias IEC60870.LinkLayerParameters
+
+    bll = Balanced.new(1, 1, false, %LinkLayerParameters{use_single_char_ack: true})
+
+    app_state = []
+
+    callbacks = %{
+      handle_user_data: fn list, data -> list ++ [data] end
+    }
+
+    # 1. First frame with FCB = true (matches expected)
+    ctrl1 = %{fc: 3, fcb_or_acd: true, fcv_or_dfc: true, prm: true, dir: false}
+    frame1 = {:variable_frame, ctrl1, 1, "packet_1"}
+
+    {bll, app_state, replies, _changes} =
+      Balanced.handle_frame(bll, frame1, app_state, callbacks, 1000)
+
+    assert replies == [:single_char_ack]
+    assert app_state == ["packet_1"]
+    assert bll.expected_fcb == false
+
+    # 2. Duplicate retransmitted frame with same FCB = true (mismatch because expected is false)
+    {bll, app_state, replies2, _changes} =
+      Balanced.handle_frame(bll, frame1, app_state, callbacks, 1100)
+
+    # Secondary MUST acknowledge to stop sender retransmissions!
+    assert replies2 == [:single_char_ack]
+    # And MUST NOT re-deliver duplicate user data to application callback!
+    assert app_state == ["packet_1"]
+    # Expected FCB remains false
+    assert bll.expected_fcb == false
+  end
+
+  test "Unbalanced secondary handles FC=2 (Test function for link) and FC=1 (Reset user process)" do
+    alias IEC60870.CS101.LinkLayer.SecondaryUnbalanced
+    alias IEC60870.LinkLayerParameters
+
+    sll = SecondaryUnbalanced.new(1, %LinkLayerParameters{use_single_char_ack: true})
+
+    callbacks = %{
+      is_class_1_available: fn st -> st.has_c1 end,
+      pop_class_1_data: fn st -> {nil, st} end,
+      pop_class_2_data: fn st -> {nil, st} end,
+      handle_user_data: fn st, _ud, _bcast -> st end,
+      reset_cu_received: fn st, _only_fcb -> %{st | reset_called: true} end
+    }
+
+    app_state = %{has_c1: false, reset_called: false}
+
+    # 1. Primary sends FC=2 (TEST_FUNCTION_FOR_LINK) with FCB=true, FCV=true
+    ctrl_test = %{fc: 2, fcb_or_acd: true, fcv_or_dfc: true, prm: true, dir: false}
+    frame_test = {:fixed_frame, ctrl_test, 1}
+
+    {sll, app_state, replies, _changes} =
+      SecondaryUnbalanced.handle_frame(sll, frame_test, app_state, callbacks, 1000)
+
+    # When no class 1 is available and single char ack is enabled, reply :single_char_ack
+    assert replies == [:single_char_ack]
+    assert sll.expected_fcb == false
+
+    # 2. When Class 1 data is available, FC=2 must reply with fixed frame carrying ACD=true
+    app_state = %{app_state | has_c1: true}
+    ctrl_test2 = %{fc: 2, fcb_or_acd: false, fcv_or_dfc: true, prm: true, dir: false}
+    frame_test2 = {:fixed_frame, ctrl_test2, 1}
+
+    {sll, app_state, replies2, _changes} =
+      SecondaryUnbalanced.handle_frame(sll, frame_test2, app_state, callbacks, 1100)
+
+    assert [
+             {:fixed_frame, %{fc: 0, fcb_or_acd: true, fcv_or_dfc: false, prm: false}, 1}
+           ] = replies2
+
+    assert sll.expected_fcb == true
+
+    # 3. Primary sends FC=1 (RESET_USER_PROCESS)
+    ctrl_reset = %{fc: 1, fcb_or_acd: false, fcv_or_dfc: false, prm: true, dir: false}
+    frame_reset = {:fixed_frame, ctrl_reset, 1}
+
+    {sll, app_state, replies3, _changes} =
+      SecondaryUnbalanced.handle_frame(sll, frame_reset, app_state, callbacks, 1200)
+
+    assert replies3 == [:single_char_ack]
+    assert app_state.reset_called == true
+    assert sll.expected_fcb == true
+  end
 end

@@ -131,8 +131,8 @@ defmodule IEC60870.CS101.Master do
     send_process_command(master, :activation, ca, io)
   end
 
-  def send_process_command(master, cot, ca, io) when is_struct(io) do
-    GenServer.call(master, {:send_process_command, cot, ca, io})
+  def send_process_command(master, cot, ca, io, slave_address \\ nil) when is_struct(io) do
+    GenServer.call(master, {:send_process_command, cot, ca, io, slave_address})
   end
 
   @doc """
@@ -291,7 +291,7 @@ defmodule IEC60870.CS101.Master do
     {:reply, :ok, step_link_layer(%{state | link_layer: bll})}
   end
 
-  def handle_call({:send_process_command, cot, ca, io}, _from, state) do
+  def handle_call({:send_process_command, cot, ca, io, target_addr}, _from, state) do
     asdu =
       ASDU.new(InformationObject.type_id(io),
         cot: cot,
@@ -300,10 +300,16 @@ defmodule IEC60870.CS101.Master do
         objects: [io]
       )
 
-    case do_send_asdu(state, asdu, state.slave_address) do
+    addr = target_addr || state.slave_address
+
+    case do_send_asdu(state, asdu, addr) do
       {:ok, new_state} -> {:reply, :ok, new_state}
       {:error, reason, new_state} -> {:reply, {:error, reason}, new_state}
     end
+  end
+
+  def handle_call({:send_process_command, cot, ca, io}, from, state) do
+    handle_call({:send_process_command, cot, ca, io, nil}, from, state)
   end
 
   def handle_call({:send_asdu, asdu, target_addr}, _from, state) do

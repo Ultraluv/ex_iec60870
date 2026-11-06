@@ -10,13 +10,14 @@ IO.puts("==================================================")
 IO.puts(" IEC 60870-5-101 Unbalanced Master Example")
 IO.puts("==================================================")
 
-{:ok, bus} = VirtualBus.start_link()
+port = String.to_integer(System.get_env("CS101_PORT") || "2401")
+{:ok, bus} = VirtualBus.get_or_create(port: port)
 
 {:ok, master} =
   Master.start_link(
     transport: {VirtualBus, bus},
     mode: :unbalanced,
-    slaves: [1, 2],
+    slaves: [1],
     slave_address: 1,
     asdu_handler: fn _m, slave_addr, asdu ->
       IO.puts(
@@ -28,7 +29,7 @@ IO.puts("==================================================")
     end
   )
 
-Process.sleep(200)
+Process.sleep(500)
 
 IO.puts("[CS101 Master] Polling Slave 1 for Class 2 background data...")
 :ok = Master.poll_single_slave(master, 1)
@@ -39,10 +40,10 @@ IO.puts("[CS101 Master] Sending Interrogation Command to Slave 1...")
 
 Process.sleep(500)
 
-IO.puts("[CS101 Master] Sending Control Command to Slave 2...")
+IO.puts("[CS101 Master] Sending Control Command to Slave 1...")
 cmd = Control.single_command(500, true, false, 0)
-:ok = Master.use_slave_address(master, 2)
-:ok = Master.send_process_command(master, :activation, 2, cmd)
+:ok = Master.use_slave_address(master, 1)
+:ok = Master.send_process_command(master, :activation, 1, cmd)
 
 IO.puts("[CS101 Master] Master loop running. Press Ctrl+C to terminate.")
 Process.sleep(:infinity)
