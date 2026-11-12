@@ -164,7 +164,7 @@ defmodule IEC60870.CS101.Slave do
     dir = Keyword.get(opts, :dir, false)
     c1_size = Keyword.get(opts, :class_1_queue_size, 100)
     c2_size = Keyword.get(opts, :class_2_queue_size, 100)
-    idle_timeout = Keyword.get(opts, :idle_timeout, 500)
+    idle_timeout = Keyword.get(opts, :idle_timeout, ll_params.timeout_link_state)
     tick_interval = Keyword.get(opts, :tick_interval_ms, 20)
 
     transport =
@@ -187,7 +187,7 @@ defmodule IEC60870.CS101.Slave do
             other_station_address,
             dir,
             ll_params,
-            ll_params.timeout_link_state
+            idle_timeout
           )
       end
 
@@ -265,7 +265,7 @@ defmodule IEC60870.CS101.Slave do
   def handle_call({:set_dir, dir}, _from, state) do
     ll =
       case state.mode do
-        :balanced -> %{state.link_layer | dir: dir}
+        :balanced -> Balanced.set_dir(state.link_layer, dir)
         _ -> state.link_layer
       end
 

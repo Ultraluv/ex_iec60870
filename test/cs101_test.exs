@@ -316,4 +316,59 @@ defmodule IEC60870.CS101Test do
     assert app_state.reset_called == true
     assert sll.expected_fcb == true
   end
+
+  test "CS101 Balanced mode role-based initialization and heartbeat behavior" do
+    alias IEC60870.CS101.LinkLayer.Balanced
+    alias IEC60870.LinkLayerParameters
+
+    ll_params = %LinkLayerParameters{use_single_char_ack: true}
+
+    # 1. Slave (dir: false) starts in :pll_wait_remote_init and produces NO management frames
+    slave_bll = Balanced.new(1, 1, false, ll_params, 1000)
+    assert slave_bll.primary_state == :pll_wait_remote_init
+
+    pop_fun = fn st -> {nil, st} end
+    {slave_bll, _app, frames, _changes} = Balanced.run(slave_bll, %{}, pop_fun, 1000)
+    assert frames == []
+
+    # 2. Master (dir: true) starts in :pll_idle and initiates link status inquiry FC=9
+    master_bll = Balanced.new(1, 1, true, ll_params, 1000)
+    assert master_bll.primary_state == :pll_idle
+
+    {master_bll, _app, [frame_fc9], _changes} = Balanced.run(master_bll, %{}, pop_fun, 1000)
+    assert {:fixed_frame, %{fc: 9, dir: true, prm: true}, 1} = frame_fc9
+    assert master_bll.primary_state == :pll_execute_request_status_of_link
+
+    # 3. Slave receives FC=0 (Reset remote link) -> transitions to :pll_link_layers_available and :available
+    ctrl_fc0 = %{fc: 0, fcb_or_acd: false, fcv_or_dfc: false, prm: true, dir: true}
+    frame_fc0 = {:fixed_frame, ctrl_fc0, 1}
+    callbacks = %{handle_user_data: fn st, _ud -> st end}
+
+    {slave_bll, _app, [ack_reply], changes} =
+      Balanced.handle_frame(slave_bll, frame_fc0, %{}, callbacks, 1050)
+
+    assert ack_reply == :single_char_ack
+    assert changes == [{-1, :available}]
+    assert slave_bll.primary_state == :pll_link_layers_available
+
+    # 4. Idle timeout check: Slave (dir: false) must NOT send FC=2 on idle timeout
+    {slave_bll2, _app, idle_frames_slave, _} =
+      Balanced.run(slave_bll, %{}, pop_fun, 3000)
+
+    assert idle_frames_slave == []
+    assert slave_bll2.send_link_test == false
+
+    # 5. Master (dir: true) in :pll_link_layers_available triggers FC=2 on idle timeout
+    master_avail = %{
+      master_bll
+      | primary_state: :pll_link_layers_available,
+        last_received_msg: 1000
+    }
+
+    {master_avail2, _app, [frame_test], _} =
+      Balanced.run(master_avail, %{}, pop_fun, 3000)
+
+    assert {:fixed_frame, %{fc: 2, dir: true, prm: true}, 1} = frame_test
+    assert master_avail2.primary_state == :pll_execute_service_send_confirm
+  end
 end

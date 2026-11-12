@@ -181,6 +181,7 @@ defmodule IEC60870.CS101.Master do
     slave_address = Keyword.get(opts, :slave_address, 1)
     dir = Keyword.get(opts, :dir, true)
     queue_size = Keyword.get(opts, :queue_size, 100)
+    idle_timeout = Keyword.get(opts, :idle_timeout, ll_params.timeout_link_state)
     tick_interval = Keyword.get(opts, :tick_interval_ms, 20)
 
     # If transport is a VirtualBus pid, attach this process
@@ -204,7 +205,7 @@ defmodule IEC60870.CS101.Master do
           end)
 
         :balanced ->
-          Balanced.new(own_address, slave_address, dir, ll_params, ll_params.timeout_link_state)
+          Balanced.new(own_address, slave_address, dir, ll_params, idle_timeout)
       end
 
     tick_ref = Process.send_after(self(), :tick, tick_interval)
@@ -324,7 +325,7 @@ defmodule IEC60870.CS101.Master do
   def handle_call({:set_dir, dir}, _from, state) do
     ll =
       case state.mode do
-        :balanced -> %{state.link_layer | dir: dir}
+        :balanced -> Balanced.set_dir(state.link_layer, dir)
         _ -> state.link_layer
       end
 

@@ -115,6 +115,7 @@ defmodule IEC60870.CS101.Transport.VirtualBus do
         case :gen_tcp.listen(port, [:binary, packet: :raw, active: true, reuseaddr: true]) do
           {:ok, listen_sock} ->
             send(self(), :accept)
+
             {:ok,
              %{
                peers: MapSet.new(),

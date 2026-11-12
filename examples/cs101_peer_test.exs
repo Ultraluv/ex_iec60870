@@ -27,6 +27,7 @@ IO.puts("=================================================================")
 
       # Provide telemetry measurement
       io = Monitoring.measured_value_scaled(100, 2500, 0x00)
+
       resp =
         ASDU.new(:m_me_nb_1,
           cot: :interrogated_by_station,

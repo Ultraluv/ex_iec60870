@@ -1080,7 +1080,7 @@ defmodule IEC60870.CS101.LinkLayer do
       waiting_for_response: false,
       last_send_time: 0,
       original_send_time: 0,
-      last_received_msg: 0,
+      last_received_msg: nil,
       idle_timeout: 5000,
       send_link_test: false,
       last_sent_asdu_bin: nil
@@ -1093,13 +1093,45 @@ defmodule IEC60870.CS101.LinkLayer do
           %LinkLayerParameters{} = ll_params,
           idle_timeout \\ 5000
         ) do
+      # IEC 60870-5-101 Balanced Mode:
+      # Control Station (dir: true) initiates link handshake (:pll_idle -> FC=9 -> FC=0).
+      # Controlled Station (dir: false) must wait passively for remote init (:pll_wait_remote_init)
+      # and MUST NOT initiate FC=9 / FC=0 management frames.
+      initial_pstate = if dir, do: :pll_idle, else: :pll_wait_remote_init
+
       %__MODULE__{
         address: address,
         other_station_address: other_station_address,
         dir: dir,
         ll_params: ll_params,
-        idle_timeout: idle_timeout
+        idle_timeout: idle_timeout,
+        primary_state: initial_pstate,
+        last_received_msg: nil
       }
+    end
+
+    @doc """
+    Dynamically sets the DIR flag on a balanced station, adjusting state machine if waiting for remote init.
+    """
+    def set_dir(%__MODULE__{} = bll, dir) when is_boolean(dir) do
+      pstate =
+        cond do
+          dir and bll.primary_state == :pll_wait_remote_init ->
+            :pll_idle
+
+          not dir and
+              bll.primary_state in [
+                :pll_idle,
+                :pll_execute_request_status_of_link,
+                :pll_execute_reset_remote_link
+              ] ->
+            :pll_wait_remote_init
+
+          true ->
+            bll.primary_state
+        end
+
+      %{bll | dir: dir, primary_state: pstate}
     end
 
     @doc """
@@ -1139,6 +1171,11 @@ defmodule IEC60870.CS101.LinkLayer do
     """
     def run(%__MODULE__{} = bll, app_state, pop_user_data_fun, now_ms) do
       case bll.primary_state do
+        :pll_wait_remote_init ->
+          # Controlled Station (dir: false) in balanced mode waits for Control Station (dir: true)
+          # to initialize the link via FC=0 / FC=9. It never initiates management frames.
+          {bll, app_state, [], []}
+
         :pll_idle ->
           frame =
             {:fixed_frame,
@@ -1192,9 +1229,11 @@ defmodule IEC60870.CS101.LinkLayer do
         :pll_execute_reset_remote_link ->
           if bll.waiting_for_response do
             if now_ms - bll.last_send_time > bll.ll_params.timeout_for_ack do
+              reset_pstate = if bll.dir, do: :pll_idle, else: :pll_wait_remote_init
+
               {bll1, changes} =
                 set_bll_state(
-                  %{bll | waiting_for_response: false, primary_state: :pll_idle},
+                  %{bll | waiting_for_response: false, primary_state: reset_pstate},
                   :error
                 )
 
@@ -1210,8 +1249,12 @@ defmodule IEC60870.CS101.LinkLayer do
           end
 
         :pll_link_layers_available ->
+          # Only Control Station (dir: true) triggers periodic link test function on idle timeout.
+          # Controlled Station (dir: false) can spontaneously send confirmed user data,
+          # but does not initiate periodic link test management frames.
           bll =
-            if bll.last_received_msg > 0 and now_ms - bll.last_received_msg > bll.idle_timeout do
+            if bll.dir and bll.last_received_msg != nil and
+                 now_ms - bll.last_received_msg > bll.idle_timeout do
               %{bll | send_link_test: true, last_received_msg: now_ms}
             else
               bll
@@ -1271,6 +1314,8 @@ defmodule IEC60870.CS101.LinkLayer do
         :pll_execute_service_send_confirm ->
           if now_ms - bll.last_send_time > bll.ll_params.timeout_for_ack do
             if now_ms - bll.original_send_time > bll.ll_params.timeout_repeat do
+              reset_pstate = if bll.dir, do: :pll_idle, else: :pll_wait_remote_init
+
               {bll1, changes} =
                 set_bll_state(
                   %{
@@ -1278,7 +1323,7 @@ defmodule IEC60870.CS101.LinkLayer do
                     | waiting_for_response: false,
                       last_sent_asdu_bin: nil,
                       send_link_test: false,
-                      primary_state: :pll_idle
+                      primary_state: reset_pstate
                   },
                   :error
                 )
@@ -1340,8 +1385,17 @@ defmodule IEC60870.CS101.LinkLayer do
         case ctrl.fc do
           0 ->
             # LL_FC_00_RESET_REMOTE_LINK
-            bll1 = %{bll | expected_fcb: true}
-            {bll1, app_state, [secondary_ack(bll1)], []}
+            # Remote station has reset the link. Secondary updates expected FCB and becomes available.
+            bll1 = %{bll | expected_fcb: true, primary_state: :pll_link_layers_available}
+
+            {bll2, changes} =
+              if bll.state != :available do
+                set_bll_state(bll1, :available)
+              else
+                {bll1, []}
+              end
+
+            {bll2, app_state, [secondary_ack(bll2)], changes}
 
           2 ->
             # LL_FC_02_TEST_FUNCTION_FOR_LINK

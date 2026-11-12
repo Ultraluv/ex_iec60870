@@ -55,5 +55,8 @@ port = String.to_integer(System.get_env("CS101_PORT") || "2401")
     end
   )
 
-IO.puts("[CS101 Slave] Slave station address 1 running on bus port #{port}. Press Ctrl+C to stop.")
+IO.puts(
+  "[CS101 Slave] Slave station address 1 running on bus port #{port}. Press Ctrl+C to stop."
+)
+
 Process.sleep(:infinity)
