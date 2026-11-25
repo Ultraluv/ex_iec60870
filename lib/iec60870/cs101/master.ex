@@ -55,6 +55,8 @@ defmodule IEC60870.CS101.Master do
   - `:slave_address` - default target slave link address (default `1`)
   - `:slaves` - list of slave link addresses to register initially in unbalanced mode
   - `:dir` - `DIR` bit in balanced mode (default `true`)
+  - `:initiate_link` - whether to initiate `FC=9` / `FC=0` link reset in balanced mode (default `dir`)
+  - `:auto_link_test` - whether to send periodic `FC=2` link test on idle timeout in balanced mode (default `dir`)
   - `:queue_size` - max ASDU queue size in balanced mode (default `100`)
   - `:owner` - PID to receive `{:iec60870_cs101_master, master_pid, event}` messages
   - `:asdu_handler` - `fn master_pid, slave_addr, asdu -> any() end`
@@ -205,7 +207,8 @@ defmodule IEC60870.CS101.Master do
           end)
 
         :balanced ->
-          Balanced.new(own_address, slave_address, dir, ll_params, idle_timeout)
+          balanced_opts = Keyword.take(opts, [:initiate_link, :auto_link_test])
+          Balanced.new(own_address, slave_address, dir, ll_params, idle_timeout, balanced_opts)
       end
 
     tick_ref = Process.send_after(self(), :tick, tick_interval)

@@ -254,4 +254,105 @@ defmodule IEC60870.CS104Test do
     :gen_tcp.close(raw_sock)
     Slave.stop(slave)
   end
+
+  test "CS104 Slave enqueue_asdu_to_group isolates ASDUs per redundancy group" do
+    test_pid = self()
+    rg_a = RedundancyGroup.new("GroupA", ["127.0.0.1"])
+    rg_b = RedundancyGroup.new("GroupB", ["127.0.0.2"])
+
+    {:ok, slave} =
+      Slave.start_link(
+        port: 0,
+        server_mode: :multiple_redundancy_groups,
+        redundancy_groups: [rg_a, rg_b],
+        owner: test_pid
+      )
+
+    {:ok, port} = Slave.get_port(slave)
+
+    # Connect GroupA client from 127.0.0.1 and GroupB client from 127.0.0.2
+    {:ok, sock_a} =
+      :gen_tcp.connect(~c"127.0.0.1", port, [
+        :binary,
+        active: false,
+        packet: :raw,
+        ip: {127, 0, 0, 1}
+      ])
+
+    {:ok, sock_b} =
+      :gen_tcp.connect(~c"127.0.0.1", port, [
+        :binary,
+        active: false,
+        packet: :raw,
+        ip: {127, 0, 0, 2}
+      ])
+
+    {:ok, startdt_act} = Frame.encode({:u_frame, :startdt_act})
+    :ok = :gen_tcp.send(sock_a, startdt_act)
+    :ok = :gen_tcp.send(sock_b, startdt_act)
+
+    assert {:ok, bin_a} = :gen_tcp.recv(sock_a, 6, 2000)
+    assert {:ok, {:u_frame, :startdt_con}} = Frame.decode(bin_a)
+    assert {:ok, bin_b} = :gen_tcp.recv(sock_b, 6, 2000)
+    assert {:ok, {:u_frame, :startdt_con}} = Frame.decode(bin_b)
+
+    recv_i_frame = fn sock ->
+      assert {:ok, <<0x68, len::8>>} = :gen_tcp.recv(sock, 2, 2000)
+      assert {:ok, body} = :gen_tcp.recv(sock, len, 2000)
+      {:ok, {:i_frame, _ns, _nr, asdu_bin}} = Frame.decode(<<0x68, len::8, body::binary>>)
+      ASDU.decode(asdu_bin)
+    end
+
+    # 1. Enqueue to GroupA by name -> only GroupA receives it
+    asdu_a =
+      ASDU.new(:m_sp_na_1,
+        cot: :spontaneous,
+        ca: 10,
+        objects: [Monitoring.single_point(101, true, 0x00)]
+      )
+
+    assert :ok = Slave.enqueue_asdu_to_group(slave, "GroupA", asdu_a)
+    assert {:ok, %ASDU{ca: 10}} = recv_i_frame.(sock_a)
+    assert {:error, :timeout} = :gen_tcp.recv(sock_b, 1, 100)
+
+    # 2. Enqueue to GroupB by struct -> only GroupB receives it
+    asdu_b =
+      ASDU.new(:m_sp_na_1,
+        cot: :spontaneous,
+        ca: 20,
+        objects: [Monitoring.single_point(201, false, 0x00)]
+      )
+
+    assert :ok = Slave.enqueue_asdu_to_group(slave, rg_b, asdu_b)
+    assert {:ok, %ASDU{ca: 20}} = recv_i_frame.(sock_b)
+    assert {:error, :timeout} = :gen_tcp.recv(sock_a, 1, 100)
+
+    # 3. Enqueue to GroupA by index -> only GroupA receives it
+    asdu_a2 =
+      ASDU.new(:m_sp_na_1,
+        cot: :spontaneous,
+        ca: 11,
+        objects: [Monitoring.single_point(102, true, 0x00)]
+      )
+
+    assert :ok = Slave.enqueue_asdu_to_group(slave, 0, asdu_a2)
+    assert {:ok, %ASDU{ca: 11}} = recv_i_frame.(sock_a)
+    assert {:error, :timeout} = :gen_tcp.recv(sock_b, 1, 100)
+
+    # 4. Unknown group queries return {:error, :unknown_group}
+    assert {:error, :unknown_group} = Slave.enqueue_asdu_to_group(slave, "NonExistent", asdu_a)
+    assert {:error, :unknown_group} = Slave.enqueue_asdu_to_group(slave, 99, asdu_a)
+
+    assert {:error, :unknown_group} =
+             Slave.enqueue_asdu_to_group(slave, RedundancyGroup.new("Other", ["10.0.0.1"]), asdu_a)
+
+    :gen_tcp.close(sock_a)
+    :gen_tcp.close(sock_b)
+    Slave.stop(slave)
+
+    # 5. Non-:multiple_redundancy_groups mode returns {:error, :unknown_group}
+    {:ok, single_slave} = Slave.start_link(port: 0, server_mode: :single_redundancy_group)
+    assert {:error, :unknown_group} = Slave.enqueue_asdu_to_group(single_slave, 0, asdu_a)
+    Slave.stop(single_slave)
+  end
 end

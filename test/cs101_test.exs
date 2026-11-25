@@ -371,4 +371,66 @@ defmodule IEC60870.CS101Test do
     assert {:fixed_frame, %{fc: 2, dir: true, prm: true}, 1} = frame_test
     assert master_avail2.primary_state == :pll_execute_service_send_confirm
   end
+
+  test "CS101 Balanced mode supports configurable bidirectional link reset without short-circuiting Master init" do
+    alias IEC60870.CS101.LinkLayer.Balanced
+    alias IEC60870.LinkLayerParameters
+
+    ll_params = %LinkLayerParameters{use_single_char_ack: true}
+    pop_fun = fn st -> {nil, st} end
+    callbacks = %{handle_user_data: fn st, _ud -> st end}
+
+    # 1. Master (dir: true) in :pll_idle receives FC=0 from remote first -> must NOT skip its own init
+    master_bll = Balanced.new(1, 1, true, ll_params, 1000)
+    assert master_bll.primary_state == :pll_idle
+
+    ctrl_slave_fc0 = %{fc: 0, fcb_or_acd: false, fcv_or_dfc: false, prm: true, dir: false}
+
+    {master_bll, _app, [ack_to_slave], changes} =
+      Balanced.handle_frame(master_bll, {:fixed_frame, ctrl_slave_fc0, 1}, %{}, callbacks, 1000)
+
+    assert ack_to_slave == :single_char_ack
+    assert changes == []
+    assert master_bll.expected_fcb == true
+    assert master_bll.primary_state == :pll_idle
+
+    # Master still initiates its own FC=9 -> FC=0 handshake
+    {_master_bll, _app, [master_fc9], _} = Balanced.run(master_bll, %{}, pop_fun, 1010)
+    assert {:fixed_frame, %{fc: 9, dir: true, prm: true}, 1} = master_fc9
+
+    # 2. Slave configured with initiate_link: true, auto_link_test: false (bidirectional reset, master-only heartbeat)
+    {:ok, bus} = VirtualBus.start_link()
+
+    {:ok, slave} =
+      Slave.start_link(
+        transport: {VirtualBus, bus},
+        mode: :balanced,
+        link_address: 1,
+        other_station_address: 1,
+        dir: false,
+        initiate_link: true,
+        auto_link_test: false,
+        idle_timeout: 1000,
+        owner: self(),
+        tick_interval_ms: 10
+      )
+
+    {:ok, master} =
+      Master.start_link(
+        transport: {VirtualBus, bus},
+        mode: :balanced,
+        own_address: 1,
+        slave_address: 1,
+        dir: true,
+        idle_timeout: 1000,
+        owner: self(),
+        tick_interval_ms: 10
+      )
+
+    assert_receive {:iec60870_cs101_master, ^master, {:link_state, -1, :available}}, 2000
+    assert_receive {:iec60870_cs101_slave, ^slave, {:link_state, -1, :available}}, 2000
+
+    Master.stop(master)
+    Slave.stop(slave)
+  end
 end

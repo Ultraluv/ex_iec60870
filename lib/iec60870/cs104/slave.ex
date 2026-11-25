@@ -184,6 +184,24 @@ defmodule IEC60870.CS104.Slave do
   end
 
   @doc """
+  Enqueues a spontaneous/periodic ASDU into the low-priority queue of a specific redundancy group
+  when running in `:multiple_redundancy_groups` mode.
+
+  `group_or_id` may be:
+  - a zero-based group index (`non_neg_integer()`)
+  - a `%IEC60870.CS104.RedundancyGroup{}` struct
+  - a group name (`String.t()`)
+  """
+  @spec enqueue_asdu_to_group(
+          GenServer.server(),
+          RedundancyGroup.t() | non_neg_integer() | String.t(),
+          ASDU.t()
+        ) :: :ok | {:error, :unknown_group}
+  def enqueue_asdu_to_group(slave, group_or_id, %ASDU{} = asdu) do
+    GenServer.call(slave, {:enqueue_asdu_to_group, group_or_id, asdu})
+  end
+
+  @doc """
   Enqueues an ASDU into the transmission queue(s). Convenience alias for `enqueue_asdu/2`.
   """
   @spec enqueue_user_data(GenServer.server(), ASDU.t()) :: :ok
@@ -452,20 +470,37 @@ defmodule IEC60870.CS104.Slave do
     end
   end
 
+  def handle_call({:enqueue_asdu_to_group, group_or_id, asdu}, _from, state) do
+    case resolve_target_group_key(state, group_or_id) do
+      {:ok, qkey} ->
+        qpair = Map.fetch!(state.queues, qkey)
+
+        {new_qpair, next_id} =
+          append_low_prio_entry(qpair, asdu, state.next_entry_id, state.max_low_prio_queue_size)
+
+        state = %{state | queues: Map.put(state.queues, qkey, new_qpair), next_entry_id: next_id}
+
+        Enum.each(state.connections, fn {pid, info} ->
+          if info.active and info.queue_key == qkey do
+            send(pid, :flush_queues)
+          end
+        end)
+
+        {:reply, :ok, state}
+
+      {:error, :unknown_group} = err ->
+        {:reply, err, state}
+    end
+  end
+
   @impl true
   def handle_cast({:enqueue_asdu, asdu}, state) do
     {queues, next_id} =
       Enum.reduce(state.queues, {%{}, state.next_entry_id}, fn {qkey, qpair}, {acc_q, eid} ->
-        new_entry = %{entry_id: eid, asdu: asdu, state: :waiting}
+        {new_qpair, next_eid} =
+          append_low_prio_entry(qpair, asdu, eid, state.max_low_prio_queue_size)
 
-        low_list =
-          if length(qpair.low_prio) >= state.max_low_prio_queue_size do
-            tl(qpair.low_prio) ++ [new_entry]
-          else
-            qpair.low_prio ++ [new_entry]
-          end
-
-        {Map.put(acc_q, qkey, %{qpair | low_prio: low_list}), eid + 1}
+        {Map.put(acc_q, qkey, new_qpair), next_eid}
       end)
 
     state = %{state | queues: queues, next_entry_id: next_id}
@@ -753,6 +788,44 @@ defmodule IEC60870.CS104.Slave do
           nil -> :reject
         end
     end
+  end
+
+  defp resolve_target_group_key(%{server_mode: :multiple_redundancy_groups} = state, group_or_id) do
+    idx =
+      cond do
+        is_integer(group_or_id) and group_or_id >= 0 ->
+          group_or_id
+
+        is_struct(group_or_id, RedundancyGroup) ->
+          Enum.find_index(state.redundancy_groups, &(&1 == group_or_id))
+
+        is_binary(group_or_id) ->
+          Enum.find_index(state.redundancy_groups, &(&1.name == group_or_id))
+
+        true ->
+          nil
+      end
+
+    if is_integer(idx) and Map.has_key?(state.queues, {:rg, idx}) do
+      {:ok, {:rg, idx}}
+    else
+      {:error, :unknown_group}
+    end
+  end
+
+  defp resolve_target_group_key(_state, _group_or_id), do: {:error, :unknown_group}
+
+  defp append_low_prio_entry(qpair, asdu, entry_id, max_size) do
+    new_entry = %{entry_id: entry_id, asdu: asdu, state: :waiting}
+
+    low_list =
+      if length(qpair.low_prio) >= max_size do
+        tl(qpair.low_prio) ++ [new_entry]
+      else
+        qpair.low_prio ++ [new_entry]
+      end
+
+    {%{qpair | low_prio: low_list}, entry_id + 1}
   end
 
   defp new_queue_pair do

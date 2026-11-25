@@ -182,12 +182,15 @@ defmodule IEC60870.CS101.Slave do
           SecondaryUnbalanced.new(link_address, ll_params, idle_timeout)
 
         :balanced ->
+          balanced_opts = Keyword.take(opts, [:initiate_link, :auto_link_test])
+
           Balanced.new(
             link_address,
             other_station_address,
             dir,
             ll_params,
-            idle_timeout
+            idle_timeout,
+            balanced_opts
           )
       end
 
