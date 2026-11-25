@@ -1068,6 +1068,8 @@ defmodule IEC60870.CS101.LinkLayer do
     alias IEC60870.CS101.Frame
     alias IEC60870.LinkLayerParameters
 
+    @type initiate_link_mode :: boolean() | :after_remote_reset
+
     defstruct [
       :address,
       :other_station_address,
@@ -1099,10 +1101,11 @@ defmodule IEC60870.CS101.LinkLayer do
       # IEC 60870-5-101 Balanced Mode:
       # By default, Control Station (dir: true) initiates link handshake (:pll_idle -> FC=9 -> FC=0)
       # and periodic FC=2 link test; Controlled Station (dir: false) waits passively (:pll_wait_remote_init).
-      # Passing `initiate_link: true` enables bidirectional link reset on a Controlled Station.
+      # Passing `initiate_link: true` initiates immediately on startup;
+      # passing `initiate_link: :after_remote_reset` waits for remote FC=0 first, then initiates FC=9 -> FC=0.
       initiate_link = Keyword.get(opts, :initiate_link, dir)
       auto_link_test = Keyword.get(opts, :auto_link_test, dir)
-      initial_pstate = if initiate_link, do: :pll_idle, else: :pll_wait_remote_init
+      initial_pstate = if initiate_link == true, do: :pll_idle, else: :pll_wait_remote_init
 
       %__MODULE__{
         address: address,
@@ -1115,6 +1118,32 @@ defmodule IEC60870.CS101.LinkLayer do
         primary_state: initial_pstate,
         last_received_msg: nil
       }
+    end
+
+    @doc """
+    Sets the link initialization mode (`true`, `false`, or `:after_remote_reset`) in balanced mode.
+    """
+    @spec set_initiate_link(%__MODULE__{}, initiate_link_mode()) :: %__MODULE__{}
+    def set_initiate_link(%__MODULE__{} = bll, mode)
+        when mode in [true, false, :after_remote_reset] do
+      pstate =
+        cond do
+          mode == true and bll.primary_state == :pll_wait_remote_init ->
+            :pll_idle
+
+          mode != true and
+              bll.primary_state in [
+                :pll_idle,
+                :pll_execute_request_status_of_link,
+                :pll_execute_reset_remote_link
+              ] ->
+            :pll_wait_remote_init
+
+          true ->
+            bll.primary_state
+        end
+
+      %{bll | initiate_link: mode, primary_state: pstate}
     end
 
     @doc """
@@ -1388,22 +1417,36 @@ defmodule IEC60870.CS101.LinkLayer do
           0 ->
             # LL_FC_00_RESET_REMOTE_LINK
             # Remote station has reset the link. Secondary updates expected FCB.
-            # Only advance primary_state to :pll_link_layers_available if waiting passively
-            # for remote init; active initiators complete their own FC=9 -> FC=0 handshake.
-            if bll.primary_state == :pll_wait_remote_init do
-              bll1 = %{bll | expected_fcb: true, primary_state: :pll_link_layers_available}
+            # When waiting passively in :pll_wait_remote_init:
+            # - :after_remote_reset -> move to :pll_idle to initiate our own FC=9 -> FC=0 reset
+            # - false -> link becomes immediately available (:pll_link_layers_available)
+            # Active initiators already in :pll_idle / :pll_execute_* keep their primary_state untouched.
+            case bll.primary_state do
+              :pll_wait_remote_init when bll.initiate_link == :after_remote_reset ->
+                bll1 = %{
+                  bll
+                  | expected_fcb: true,
+                    waiting_for_response: false,
+                    primary_state: :pll_idle
+                }
 
-              {bll2, changes} =
-                if bll.state != :available do
-                  set_bll_state(bll1, :available)
-                else
-                  {bll1, []}
-                end
+                {bll1, app_state, [secondary_ack(bll1)], []}
 
-              {bll2, app_state, [secondary_ack(bll2)], changes}
-            else
-              bll1 = %{bll | expected_fcb: true}
-              {bll1, app_state, [secondary_ack(bll1)], []}
+              :pll_wait_remote_init ->
+                bll1 = %{bll | expected_fcb: true, primary_state: :pll_link_layers_available}
+
+                {bll2, changes} =
+                  if bll.state != :available do
+                    set_bll_state(bll1, :available)
+                  else
+                    {bll1, []}
+                  end
+
+                {bll2, app_state, [secondary_ack(bll2)], changes}
+
+              _ ->
+                bll1 = %{bll | expected_fcb: true}
+                {bll1, app_state, [secondary_ack(bll1)], []}
             end
 
           2 ->
@@ -1606,6 +1649,6 @@ defmodule IEC60870.CS101.LinkLayer do
     end
 
     defp reset_pstate(%__MODULE__{initiate_link: true}), do: :pll_idle
-    defp reset_pstate(%__MODULE__{initiate_link: false}), do: :pll_wait_remote_init
+    defp reset_pstate(%__MODULE__{initiate_link: _}), do: :pll_wait_remote_init
   end
 end

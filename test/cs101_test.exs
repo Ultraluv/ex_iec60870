@@ -433,4 +433,95 @@ defmodule IEC60870.CS101Test do
     Master.stop(master)
     Slave.stop(slave)
   end
+
+  test "CS101 Balanced mode initiate_link: :after_remote_reset and set_initiate_link/2" do
+    alias IEC60870.CS101.LinkLayer.Balanced
+    alias IEC60870.LinkLayerParameters
+
+    ll_params = %LinkLayerParameters{use_single_char_ack: true}
+    pop_fun = fn st -> {nil, st} end
+    callbacks = %{handle_user_data: fn st, _ud -> st end}
+
+    # 1. Slave with initiate_link: :after_remote_reset waits passively before Master sends FC=0
+    slave_bll =
+      Balanced.new(1, 1, false, ll_params, 5000, initiate_link: :after_remote_reset)
+
+    assert slave_bll.primary_state == :pll_wait_remote_init
+    {slave_bll, _app, frames_before, _changes} = Balanced.run(slave_bll, %{}, pop_fun, 1000)
+    assert frames_before == []
+
+    # 2. Master sends FC=0 -> Slave replies ACK and transitions to :pll_idle (not :available yet)
+    ctrl_fc0 = %{fc: 0, fcb_or_acd: false, fcv_or_dfc: false, prm: true, dir: true}
+
+    {slave_bll, _app, [ack_reply], changes_after_fc0} =
+      Balanced.handle_frame(slave_bll, {:fixed_frame, ctrl_fc0, 1}, %{}, callbacks, 1050)
+
+    assert ack_reply == :single_char_ack
+    assert changes_after_fc0 == []
+    assert slave_bll.primary_state == :pll_idle
+
+    # 3. Slave now initiates its own FC=9 -> FC=0 -> ACK handshake
+    {slave_bll, _app, [slave_fc9], _} = Balanced.run(slave_bll, %{}, pop_fun, 1060)
+    assert {:fixed_frame, %{fc: 9, dir: false, prm: true}, 1} = slave_fc9
+
+    ctrl_fc11 = %{fc: 11, fcb_or_acd: false, fcv_or_dfc: false, prm: false, dir: true}
+
+    {slave_bll, _app, [slave_fc0], _} =
+      Balanced.handle_frame(slave_bll, {:fixed_frame, ctrl_fc11, 1}, %{}, callbacks, 1070)
+
+    assert {:fixed_frame, %{fc: 0, dir: false, prm: true}, 1} = slave_fc0
+
+    {slave_bll, _app, [], changes_after_ack} =
+      Balanced.handle_frame(slave_bll, :single_char_ack, %{}, callbacks, 1080)
+
+    assert changes_after_ack == [{-1, :available}]
+    assert slave_bll.primary_state == :pll_link_layers_available
+
+    # 4. Runtime set_initiate_link/2 supports switching across all three enum values
+    bll_rt = Balanced.new(1, 1, false, ll_params)
+    assert bll_rt.initiate_link == false
+    assert bll_rt.primary_state == :pll_wait_remote_init
+
+    bll_rt = Balanced.set_initiate_link(bll_rt, true)
+    assert bll_rt.initiate_link == true
+    assert bll_rt.primary_state == :pll_idle
+
+    bll_rt = Balanced.set_initiate_link(bll_rt, :after_remote_reset)
+    assert bll_rt.initiate_link == :after_remote_reset
+    assert bll_rt.primary_state == :pll_wait_remote_init
+
+    # 5. End-to-end Master <-> Slave with set_initiate_link(:after_remote_reset)
+    {:ok, bus} = VirtualBus.start_link()
+
+    {:ok, slave} =
+      Slave.start_link(
+        transport: {VirtualBus, bus},
+        mode: :balanced,
+        link_address: 1,
+        other_station_address: 1,
+        dir: false,
+        owner: self(),
+        tick_interval_ms: 10
+      )
+
+    assert :ok = Slave.set_initiate_link(slave, :after_remote_reset)
+
+    {:ok, master} =
+      Master.start_link(
+        transport: {VirtualBus, bus},
+        mode: :balanced,
+        own_address: 1,
+        slave_address: 1,
+        dir: true,
+        owner: self(),
+        tick_interval_ms: 10
+      )
+
+    assert :ok = Master.set_initiate_link(master, true)
+    assert_receive {:iec60870_cs101_master, ^master, {:link_state, -1, :available}}, 2000
+    assert_receive {:iec60870_cs101_slave, ^slave, {:link_state, -1, :available}}, 2000
+
+    Master.stop(master)
+    Slave.stop(slave)
+  end
 end

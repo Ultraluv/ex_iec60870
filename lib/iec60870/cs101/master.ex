@@ -55,7 +55,7 @@ defmodule IEC60870.CS101.Master do
   - `:slave_address` - default target slave link address (default `1`)
   - `:slaves` - list of slave link addresses to register initially in unbalanced mode
   - `:dir` - `DIR` bit in balanced mode (default `true`)
-  - `:initiate_link` - whether to initiate `FC=9` / `FC=0` link reset in balanced mode (default `dir`)
+  - `:initiate_link` - link initialization mode in balanced mode: `true`, `false`, or `:after_remote_reset` (default `dir`)
   - `:auto_link_test` - whether to send periodic `FC=2` link test on idle timeout in balanced mode (default `dir`)
   - `:queue_size` - max ASDU queue size in balanced mode (default `100`)
   - `:owner` - PID to receive `{:iec60870_cs101_master, master_pid, event}` messages
@@ -142,6 +142,13 @@ defmodule IEC60870.CS101.Master do
   """
   @spec set_dir(GenServer.server(), boolean()) :: :ok
   def set_dir(master, dir) when is_boolean(dir), do: GenServer.call(master, {:set_dir, dir})
+
+  @doc """
+  Sets link initialization mode (`true`, `false`, or `:after_remote_reset`) in balanced link layer mode.
+  """
+  @spec set_initiate_link(GenServer.server(), boolean() | :after_remote_reset) :: :ok
+  def set_initiate_link(master, mode) when mode in [true, false, :after_remote_reset],
+    do: GenServer.call(master, {:set_initiate_link, mode})
 
   @doc """
   Sets own link layer address in balanced mode.
@@ -333,6 +340,16 @@ defmodule IEC60870.CS101.Master do
       end
 
     {:reply, :ok, %{state | dir: dir, link_layer: ll}}
+  end
+
+  def handle_call({:set_initiate_link, mode}, _from, state) do
+    ll =
+      case state.mode do
+        :balanced -> Balanced.set_initiate_link(state.link_layer, mode)
+        _ -> state.link_layer
+      end
+
+    {:reply, :ok, %{state | link_layer: ll}}
   end
 
   def handle_call({:set_own_address, addr}, _from, state) do

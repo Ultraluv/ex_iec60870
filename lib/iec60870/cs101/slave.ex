@@ -116,6 +116,13 @@ defmodule IEC60870.CS101.Slave do
   def set_dir(slave, dir) when is_boolean(dir), do: GenServer.call(slave, {:set_dir, dir})
 
   @doc """
+  Sets link initialization mode (`true`, `false`, or `:after_remote_reset`) in balanced link layer mode.
+  """
+  @spec set_initiate_link(GenServer.server(), boolean() | :after_remote_reset) :: :ok
+  def set_initiate_link(slave, mode) when mode in [true, false, :after_remote_reset],
+    do: GenServer.call(slave, {:set_initiate_link, mode})
+
+  @doc """
   Sets idle timeout in milliseconds.
   """
   @spec set_idle_timeout(GenServer.server(), pos_integer()) :: :ok
@@ -273,6 +280,16 @@ defmodule IEC60870.CS101.Slave do
       end
 
     {:reply, :ok, %{state | dir: dir, link_layer: ll}}
+  end
+
+  def handle_call({:set_initiate_link, mode}, _from, state) do
+    ll =
+      case state.mode do
+        :balanced -> Balanced.set_initiate_link(state.link_layer, mode)
+        _ -> state.link_layer
+      end
+
+    {:reply, :ok, %{state | link_layer: ll}}
   end
 
   def handle_call({:set_idle_timeout, timeout_ms}, _from, state) do
