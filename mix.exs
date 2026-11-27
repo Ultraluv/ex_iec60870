@@ -4,7 +4,7 @@ defmodule ExIEC60870.MixProject do
   def project do
     [
       app: :ex_iec60870,
-      version: "0.1.4",
+      version: "0.1.5",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       description:
@@ -136,9 +136,9 @@ defmodule ExIEC60870.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.4"},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false}
       # Optional dependency for real serial port hardware in CS101:
-      # {:circuits_uart, "~> 1.5", optional: true}
+      # {:circuits_uart, "~> 1.7", optional: true}
     ]
   end
 

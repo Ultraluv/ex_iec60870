@@ -524,4 +524,52 @@ defmodule IEC60870.CS101Test do
     Master.stop(master)
     Slave.stop(slave)
   end
+
+  test "CS101 Balanced resets next_fcb to true when sending FC=0 after odd number of FCB toggles" do
+    alias IEC60870.CS101.LinkLayer.Balanced
+    alias IEC60870.LinkLayerParameters
+
+    ll_params = %LinkLayerParameters{use_single_char_ack: true}
+    pop_fun = fn st -> {nil, st} end
+    callbacks = %{handle_user_data: fn st, _ud -> st end}
+
+    # Simulate a station that previously toggled next_fcb to false (e.g. after 1 confirmed send)
+    # and then re-enters link initialization (:pll_idle -> FC=9 -> FC=11 -> FC=0)
+    bll = %{Balanced.new(1, 1, true, ll_params) | next_fcb: false, primary_state: :pll_idle}
+
+    # 1. Path A: handle_primary_message receives FC=11 and immediately sends FC=0
+    {bll, _app, [frame_fc9], _} = Balanced.run(bll, %{}, pop_fun, 1000)
+    assert {:fixed_frame, %{fc: 9}, 1} = frame_fc9
+
+    ctrl_fc11 = %{fc: 11, fcb_or_acd: false, fcv_or_dfc: false, prm: false, dir: false}
+
+    {bll, _app, [frame_fc0], _} =
+      Balanced.handle_frame(bll, {:fixed_frame, ctrl_fc11, 1}, %{}, callbacks, 1010)
+
+    assert {:fixed_frame, %{fc: 0}, 1} = frame_fc0
+    assert bll.next_fcb == true
+
+    # After ACK, first confirmed frame (FC=3) must carry FCB=true
+    {bll, _app, [], _} = Balanced.handle_frame(bll, :single_char_ack, %{}, callbacks, 1020)
+
+    {bll, _app, [first_data_frame], _} =
+      Balanced.run(bll, %{}, fn st -> {<<1, 2, 3>>, st} end, 1030)
+
+    assert {:variable_frame, %{fc: 3, fcb_or_acd: true, fcv_or_dfc: true}, 1, <<1, 2, 3>>} =
+             first_data_frame
+
+    assert bll.next_fcb == false
+
+    # 2. Path B: run/4 in :pll_execute_request_status_of_link with waiting_for_response: false sends FC=0
+    bll_path_b = %{
+      Balanced.new(1, 1, true, ll_params)
+      | next_fcb: false,
+        waiting_for_response: false,
+        primary_state: :pll_execute_request_status_of_link
+    }
+
+    {bll_path_b, _app, [frame_fc0_b], _} = Balanced.run(bll_path_b, %{}, pop_fun, 2000)
+    assert {:fixed_frame, %{fc: 0}, 1} = frame_fc0_b
+    assert bll_path_b.next_fcb == true
+  end
 end

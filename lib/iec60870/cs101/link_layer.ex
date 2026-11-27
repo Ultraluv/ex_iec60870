@@ -1256,6 +1256,7 @@ defmodule IEC60870.CS101.LinkLayer do
               bll
               | last_send_time: now_ms,
                 waiting_for_response: true,
+                next_fcb: true,
                 primary_state: :pll_execute_reset_remote_link
             }
 
@@ -1557,6 +1558,7 @@ defmodule IEC60870.CS101.LinkLayer do
                   bll
                   | last_send_time: now_ms,
                     waiting_for_response: true,
+                    next_fcb: true,
                     primary_state: :pll_execute_reset_remote_link
                 },
                 :busy
